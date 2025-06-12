@@ -1,0 +1,497 @@
+---
+title: "Predicting Oil Recovery Factor in The Gulf of Mexico using Public Records from Bureau of Safety and Enivronmental Enforcement(BSEE)"
+author: "Carlos Avila-Salazar"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+---
+
+```{css, echo=FALSE}
+h1, h2, h3, h4, h5, h6 {
+  text-align: center;
+}
+```
+
+## Summary
+This report presents a data-driven approach to predicting the oil recovery factor (ORF) using various machine learning models. ORF is a key metric in petroleum engineering that represents the proportion of recoverable oil from a reservoir relative to its total original oil in place (OOIP). It is a crucial factor in determining the efficiency of extraction methods and the overall profitability of an oil field. Higher ORF values indicate that a greater percentage of the oil in the reservoir can be extracted, which is influenced by geological characteristics, fluid properties, and recovery techniques. ORF can be estimated by analyitcal methods, e.g. material balances or numerical techniques such as reservoir simulation. This in particular can be very expensive and time consuming, requiring input from multiple disciplines, e.g. geo-physicists, geologists, petro-physicists, engineers, etc. These techniques need accurate data that is not usually available in early stages of the field development. At this stage, data based methods can be used to get ORF estimates that are representative of the population being evaluated and inform business decisions.
+
+The dataset used for this study, referred to as Sands Atlas 2020, was sourced from the Bureau of Safety and Environmental Enforcement (BSEE) available at the BSEE website. It contains geological and reservoir engineering parameters collected from various offshore oil fields. The dataset includes key features such as:
+
+Total Net Thickness (THK): Measures the total thickness of reservoir rock that contributes to oil production.
+
+Porosity: Represents the proportion of void space in the rock that can store hydrocarbons.
+
+Water Saturation (SW): Indicates the fraction of pore space occupied by water rather than hydrocarbons.
+
+Permeability: Measures how easily fluids can flow through the reservoir rock, expressed in millidarcies (mD).
+
+Weighted Average Initial Pressure (PI): Represents the reservoir pressure before production starts, affecting oil flow in pounds per square inch (psi).
+
+Oil API Gravity (API): A measure of oil density; higher values indicate lighter oil that flows more easily.
+
+Gas-Oil Ratio (GOR): The volume of gas produced per barrel of oil, affecting reservoir pressure and recovery efficiency in hydrocarbon reservoirs, with values expressed in thousand cubic feet per barrel (mcf/bbl) to indicate the gas content relative to oil production.
+
+The dataset was preprocessed to remove missing values and retain only numerical features for statistical analysis and machine learning modeling. To improve predictive accuracy, data entries where ORF values were zero were removed, as they could distort the model’s ability to learn meaningful patterns. Several models, including Random Forest, Linear Regression, Decision Tree, and LOESS, were trained and evaluated to determine the most effective predictive method.
+
+Model performance was assessed using Root Mean Squared Error (RMSE), a common metric for measuring prediction accuracy in regression problems. Among the models evaluated, Random Forest achieved the lowest test RMSE (0.1049734), indicating the best generalization performance. LOESS (0.1060428) and Linear Regression (0.1068171) followed closely, while the Decision Tree model performed the worst, with a test RMSE of 0.1116143, highlighting its tendency to overfit due to high variance. Notably, Random Forest also had the lowest training RMSE (0.0894715), suggesting a strong fit to the training data.
+
+```{r setup_load_data, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, error = TRUE, message = FALSE, warning = FALSE)
+
+library(knitr)
+library(caret)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(kableExtra)
+library(ggplot2)
+library(gridExtra)
+library(tibble)
+
+url <- "https://www.data.bsee.gov/GGStudies/Files/2020%20Atlas%20Update.zip" 
+download_path <- "2020_Atlas_Update.zip"
+unzip_dir <- "2020_Atlas_Update"
+
+# Download and unzip
+download.file(url, download_path, mode = "wb")
+unzip(download_path, exdir = unzip_dir)
+
+# Identify files
+files <- list.files(unzip_dir, recursive = TRUE)
+files <- list.files(unzip_dir, recursive = TRUE)
+print("Extracted Files:")
+print(files)
+
+csv_files <- grep("\\.csv$", files, value = TRUE)
+excel_files <- grep("\\.xlsx?$", files, value = TRUE)
+
+
+if (length(excel_files) > 0) {
+  data_file <- file.path(unzip_dir, excel_files[1])
+  data <- read_excel(data_file, sheet = 1)
+} else if (length(csv_files) > 0) {
+  data_file <- file.path(unzip_dir, csv_files[1])
+  data <- read_csv(data_file)
+} else {
+  stop("No suitable data file found.")
+}
+
+# Remove NA values
+data_cleaned <- na.omit(data)
+
+# Select only numeric columns
+numeric_cols <- sapply(data_cleaned, is.numeric)
+data_numeric <- data_cleaned[, numeric_cols]
+
+# Ensure ORF column exists
+if (!"ORF" %in% colnames(data_numeric)) {
+  stop("ORF column not found in dataset.")
+}
+
+# Create a filtered dataset where all specified parameters are nonzero
+dataset <- data_numeric
+
+parameters <- list(
+  "THK" = "Total Net Thickness (feet)",
+  "POROSITY" = "Porosity",
+  "SW" = "Water Saturation",
+  "PERMEABILITY" = "Permeability (mD)",
+  "PI" = "Weighted Average Initial Pressure (psi)",
+  "API" = "Weighted Average of Oil API Gravity (API units)",
+  "GOR" = "Gas-Oil Ratio (Mcf/bbl)",
+  "ORF" = "Oil Recovery Factor"
+)
+# Loop through all parameters and filter out rows where the parameter is zero
+for (param in names(parameters)) {
+  if (param %in% names(dataset)) {
+    dataset <- dataset[dataset[[param]] != 0, , drop = FALSE]
+  }
+}
+# Apply additional filter for GOR to be within (0,10)
+if ("GOR" %in% names(dataset)) {
+  dataset <- dataset[dataset$GOR > 0 & dataset$GOR < 10,]
+}
+# Apply additional filter for API to be greater than 5
+if ("API" %in% names(dataset)) {
+  dataset <- dataset[dataset$API > 5,]
+}
+nrow(dataset)
+
+```
+
+## Data Wrangling
+
+The dataset used in this analysis was obtained from the Bureau of Safety and Environmental Enforcement (BSEE) and was downloaded as a ZIP file containing multiple CSV and Excel files. The first step involved extracting the files and identifying the primary dataset for analysis. Once the data was loaded, initial cleaning steps were performed to remove missing values. There is a variety of variables, numerical and categorical variables, in consultation with a subject-matter expert, a subset of variables was selected to train the models.
+
+## Exploratory Data Analysis
+
+To better understand the dataset and identify key patterns, exploratory data analysis was conducted using scatter plots and histograms. The scatter plots examine the relationships between oil recovery factor (ORF) and various reservoir parameters, highlighting potential correlations. Meanwhile, the histograms provide insights into the distribution of each feature, allowing us to assess their variability and suitability for modeling.
+
+The relationship between total net thickness (THK) and ORF shows a slight positive trend, suggesting that thicker reservoirs may contribute to higher recovery. In contrast, porosity and ORF exhibit a weak correlation, indicating that porosity alone may not be a strong predictor of oil recovery. Similarly, water saturation (SW) and ORF display little to no correlation, suggesting that water saturation does not significantly influence ORF in a linear manner. Permeability and ORF do not present a clear trend, aligning with the highly variable distribution observed in the permeability data.
+
+The scatter plot of initial pressure (PI) versus ORF highlights a high variance in initial pressure and its effect on recovery, making it difficult to establish a strong linear relationship. On the other hand, API gravity and ORF demonstrate a moderate positive trend, suggesting that higher API gravity values may contribute to better oil recovery. Lastly, gas-oil ratio (GOR) and ORF reveal a weak negative trend, indicating that higher gas content might slightly reduce oil recovery.
+
+Overall, the scatter plots reinforce the need for non-linear modeling techniques, as simple linear relationships are not evident in most of the variables. Given these insights, Random Forest or LOESS regression may be more effective than traditional linear models in capturing the complex interactions influencing oil recovery.
+
+The histograms generated for each reservoir parameter provide valuable insights into their distributions and potential impacts on modeling. By visualizing these distributions after filtering out zero values, we can better understand the behavior of each feature and make informed decisions about preprocessing and model selection.
+
+The total net thickness (THK) histogram shows a right-skewed distribution, with most values concentrated between 5 and 50 feet. The P10, P50, and P90 percentiles (11.50, 26.26, and 56.92, respectively) indicate that a majority of the reservoirs have relatively thin pay zones, while a small fraction exhibit significantly greater thickness. Similarly, permeability (mD) exhibits a strong right skew, with values ranging from 108.77 at P10 to 1103.55 at P90. This suggests that while some reservoirs exhibit low permeability, a minority have extremely high permeability, which could significantly influence oil production rates. Gas-oil ratio (GOR) follows a similar trend, with values spanning from 0.997 to 7.23 Mcf/bbl, indicating significant variability in gas content. In this case, GOR was not used for modeling.
+
+Other parameters, such as porosity and water saturation (SW), show relatively balanced distributions. The porosity histogram presents a near-normal distribution, with values ranging between 0.26 and 0.32 at the P10 and P90 levels. With a median (P50) of 0.29, most reservoir samples exhibit moderate porosity, suggesting consistent rock quality across different reservoirs. Similarly, water saturation values, which range from 0.17 to 0.36, indicate variability in fluid saturation across different wells, but its overall distribution suggests it can be used in its raw form. Weighted average initial pressure (PI) displays a wide range, from around 2,478.63 psi at P10 to 8,022.62 psi at P90. This high variance suggests that pressure is highly reservoir-dependent and may influence oil mobility.
+
+Two parameters, weighted average oil API gravity and oil recovery factor (ORF), had significant reductions in data after filtering out zeros. API gravity was reduced by 72.64%, leaving data that primarily falls between 14.00 and 36.00, with a median of 29. API gravity is crucial in determining oil quality, and its heavily reduced dataset suggests that missing data imputation or handling should be considered before including it in the model. Similarly, ORF, which serves as the target variable, experienced a 73.64% reduction, resulting in values ranging from 0.11 to 0.47. The right skew of ORF indicates that while some reservoirs have high recovery efficiency, most exhibit moderate to low recovery factors. This distribution suggests that advanced modeling techniques, such as ensemble methods, may be required to better capture the complex relationships affecting oil recovery. Random forest was used in modeling for this reason.
+
+Overall, the histograms reveal that several parameters, including permeability, GOR, and initial pressure, exhibit high variance and skewness. The large data reductions for API gravity and ORF indicate missing data challenges that need to be addressed. Given these insights, non-linear models such as Random Forest or LOESS are likely to perform better than linear models, as they can capture the complex interactions observed in the data.
+
+### Scatter Plots of Parameters vs. ORF
+```{r, echo=FALSE, fig.width=12, fig.height=8}
+
+
+# Creating individual plots
+p1 <- ggplot(dataset, aes(x = THK, y = ORF)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Cross-plot of THK vs ORF", x = "Total Net Thickness (THK)", y = "Oil Recovery Factor (ORF)") +
+  theme_minimal()
+
+p2 <- ggplot(dataset, aes(x = POROSITY, y = ORF)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Cross-plot of Porosity vs ORF", x = "POROSITY", y = "Oil Recovery Factor (ORF)") +
+  theme_minimal()
+
+p3 <- ggplot(dataset, aes(x = SW, y = ORF)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Cross-plot of SW vs ORF", x = "Water Saturation (SW)", y = "Oil Recovery Factor (ORF)") +
+  theme_minimal()
+
+p4 <- ggplot(dataset, aes(x = PERMEABILITY, y = ORF)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Cross-plot of Permeability vs ORF", x = "PERMEABILITY", y = "Oil Recovery Factor (ORF)") +
+  theme_minimal()
+
+p5 <- ggplot(dataset, aes(x = PI, y = ORF)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Cross-plot of PI vs ORF", x = "Initial Pressure (PI)", y = "Oil Recovery Factor (ORF)") +
+  theme_minimal()
+
+p6 <- ggplot(dataset, aes(x = API, y = ORF)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Cross-plot of API vs ORF", x = "Oil API Gravity (API)", y = "Oil Recovery Factor (ORF)") +
+  theme_minimal()
+
+p7 <- ggplot(dataset, aes(x = GOR, y = ORF)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Cross-plot of GOR vs ORF", x = "Gas-Oil Ratio (GOR)", y = "Oil Recovery Factor (ORF)") +
+  theme_minimal()
+
+# Arrange the plots in a grid
+grid.arrange(p1, p2, p3, p4, p5, p6, p7, ncol = 2)
+```
+
+### Histograms of Distributions
+
+```{r, results='asis'}
+##### Visualization
+    filtered_count <- nrow(dataset)
+    if (filtered_count > 0) {  
+      
+    parameters <- c("GOR", "THK", "ORF", "SW", "PERMEABILITY", "PI", "API", "POROSITY")
+      percentile_values <- data.frame(Parameter = character(), P10 = numeric(), P50 = numeric(), P90 = numeric(), stringsAsFactors = FALSE)
+      
+      for (param in parameters) {
+        percentiles <- quantile(dataset[[param]], probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+        percentile_values <- rbind(percentile_values, data.frame(Parameter = param, P10 = percentiles[1], P50 = percentiles[2], P90 = percentiles[3]))
+      }  
+      
+    percentiles_GOR <- quantile(dataset$GOR, probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+    
+    plot_GOR <- ggplot(dataset, aes(x = GOR)) +
+      geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+      geom_density(color = "blue", linewidth = 1) +
+      coord_cartesian(xlim = c(0, 11)) +
+      geom_vline(xintercept = percentiles_GOR, linetype = "dashed", color = c("green", "red", "green"), linewidth = 1) +
+      annotate("text", x = percentiles_GOR, y = 0.05, label = c("P10", "P50", "P90"), 
+               vjust = -1, color = c("green", "red", "green"), size = 4) +
+      labs(title = "Distribution of Gas-Oil-Ratio(Mcf/bbl) with P10, P50, and P90", x = "GOR", y = "Density") +
+      theme_minimal()
+    print(plot_GOR)
+    
+    # THK Plot
+    percentiles_THK <- quantile(dataset$THK, probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+    
+    plot_THK <- ggplot(dataset, aes(x = THK)) +
+      geom_histogram(aes(y = after_stat(density)), bins = 300, fill = "lightblue", color = "black", alpha = 0.7) +
+      geom_density(color = "blue", linewidth = 1) +
+      coord_cartesian(xlim = c(0, 100)) +
+      geom_vline(xintercept = percentiles_THK, linetype = "dashed", color = c("green", "red", "green"), linewidth = 1) +
+      annotate("text", x = percentiles_THK, y = 0.04, label = c("P10", "P50", "P90"), 
+               vjust = -1, color = c("green", "red", "green"), size = 4) +
+      labs(title = "Distribution of Total Net Thickness(feet) with P10, P50, and P90", x = "THK", y = "Density") +
+      theme_minimal()
+    print(plot_THK)
+    
+    # ORF Plot
+    percentiles_ORF <- quantile(dataset$ORF, probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+    
+    plot_ORF <- ggplot(dataset, aes(x = ORF)) +
+      geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+      geom_density(color = "blue", linewidth = 1) +
+      geom_vline(xintercept = percentiles_ORF, linetype = "dashed", color = c("green", "red", "green"), linewidth = 1) +
+      annotate("text", x = percentiles_ORF, y = 0.05, label = c("P10", "P50", "P90"), 
+               vjust = -1, color = c("green", "red", "green"), size = 4) +
+      labs(title = "Distribution of Oil Recovery Factor with P10, P50, and P90", x = "ORF", y = "Density") +
+      theme_minimal()
+    print(plot_ORF)
+    
+    # SW Plot
+    percentiles_SW <- quantile(dataset$SW, probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+    
+    plot_SW <- ggplot(dataset, aes(x = SW)) +
+      geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+      geom_density(color = "blue", linewidth = 1) +
+      geom_vline(xintercept = percentiles_SW, linetype = "dashed", color = c("green", "red", "green"), linewidth = 1) +
+      annotate("text", x = percentiles_SW, y = 0.05, label = c("P10", "P50", "P90"), 
+               vjust = -1, color = c("green", "red", "green"), size = 4) +
+      labs(title = "Distribution of Water Saturation with P10, P50, and P90", x = "SW", y = "Density") +
+      theme_minimal()
+    print(plot_SW)
+    
+    # PERMEABILITY Plot
+    percentiles_PERMEABILITY <- quantile(dataset$PERMEABILITY, probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+    
+    plot_PERMEABILITY <- ggplot(dataset, aes(x = PERMEABILITY)) +
+      geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+      geom_density(color = "blue", linewidth = 1) +
+      coord_cartesian(xlim = c(0, quantile(dataset$PERMEABILITY, 0.99, na.rm = TRUE))) + 
+      geom_vline(xintercept = percentiles_PERMEABILITY, linetype = "dashed", color = c("green", "red", "green"), linewidth = 1) +
+      annotate("text", x = percentiles_PERMEABILITY, y = 0.001, label = c("P10", "P50", "P90"), 
+               vjust = -1, color = c("green", "red", "green"), size = 4) +
+      labs(title = "Distribution of Permeability (mD) with P10, P50, and P90", x = "PERMEABILITY", y = "Density") +
+      theme_minimal()
+    print(plot_PERMEABILITY)
+    
+    # PI Plot
+    percentiles_PI <- quantile(dataset$PI, probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+    
+    plot_PI <- ggplot(dataset, aes(x = PI)) +
+      geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+      geom_density(color = "blue", linewidth = 1) +
+      geom_vline(xintercept = percentiles_PI, linetype = "dashed", color = c("green", "red", "green"), linewidth = 1) +
+      annotate("text", x = percentiles_PI, y = 0.0002, label = c("P10", "P50", "P90"), 
+               vjust = -1, color = c("green", "red", "green"), size = 4) +
+      labs(title = "Distribution of Weighted Average Initial Pressure (psi) with P10, P50, and P90", x = "PI", y = "Density") +
+      theme_minimal()
+    print(plot_PI)
+    
+    # API Plot
+    percentiles_API <- quantile(dataset$API, probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+    
+    plot_API <- ggplot(dataset, aes(x = API)) +
+      geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+      geom_density(color = "blue", linewidth = 1) +
+      geom_vline(xintercept = percentiles_API, linetype = "dashed", color = c("green", "red", "green"), linewidth = 1) +
+      annotate("text", x = percentiles_API, y = 0.05, label = c("P10", "P50", "P90"), 
+               vjust = -1, color = c("green", "red", "green"), size = 4) +
+      labs(title = "Distribution of Weighted Average of Oil API (API units) with P10, P50, and P90", x = "API", y = "Density") +
+      theme_minimal()
+    print(plot_API)
+    
+    percentiles_POROSITY <- quantile(dataset$POROSITY, probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+    # Porosity Plot
+    plot_POROSITY <- ggplot(dataset, aes(x = POROSITY)) +
+      geom_histogram(aes(y = after_stat(density)), bins = 17, fill = "lightblue", color = "black", alpha = 0.7) +
+      geom_density(color = "blue", linewidth = 1) +
+      geom_vline(xintercept = percentiles_POROSITY, linetype = "dashed", color = c("green", "red", "green"), linewidth = 1) +
+      annotate("text", x = percentiles_POROSITY, y = 0.05, label = c("P10", "P50", "P90"), 
+               vjust = -1, color = c("green", "red", "green"), size = 4) +
+      labs(title = "Distribution of Porosity with P10, P50, and P90", x = "POROSITY", y = "Density") +
+      theme_minimal()
+    print(plot_POROSITY)
+    
+    # Remove unwanted row names
+    rownames(percentile_values) <- NULL 
+
+     # Print percentile table
+    print(knitr::kable(percentile_values, caption = "Percentile Splits for Each Parameter"))
+    
+    } else {
+      print("No data available after filtering parameters")
+    }
+
+  
+```
+
+
+## Modeling
+
+To predict the Oil Recovery Factor (ORF), multiple machine learning models were implemented, including Random Forest, Linear Regression, Decision Tree, and LOESS regression. These models were selected based on their ability to capture complex relationships between geological and reservoir parameters and ORF.
+
+The dataset used for modeling was preprocessed to ensure the quality and reliability of the input features. This involved removing missing values, retaining only numerical features, filtering out entries where ORF was zero, and selecting relevant predictor variables such as Total Net Thickness (THK), Porosity, Water Saturation (SW), Permeability, Weighted Average Initial Pressure (PI), and Oil API Gravity (API). A train-test split of 80%-20% was applied to the cleaned dataset to evaluate model performance effectively.
+
+For model training, a Random Forest model was trained with 5-fold and 10-fold cross-validation, using a range of tuning parameters to optimize performance. Feature importance analysis was conducted to identify the most influential variables in predicting ORF. A multiple linear regression model was also trained to assess the linear relationships between predictor variables and ORF, with cross-validation used to mitigate overfitting. A decision tree model was built to capture nonlinear relationships in the data, where the complexity parameter (cp) was tuned to balance model simplicity and predictive accuracy. Additionally, LOESS regression was applied using the best predictor variable identified through correlation analysis to capture localized trends in the data.
+
+The performance of each model was assessed using Root Mean Squared Error (RMSE) on both training and test sets. The Random Forest model achieved the lowest RMSE, indicating strong predictive performance and robustness to nonlinearities. Linear Regression showed moderate accuracy but struggled with capturing complex interactions, while the Decision Tree model provided interpretable decision rules but was prone to overfitting. LOESS regression was effective for localized trend detection but less generalizable. The results suggest that ensemble methods like Random Forest outperform simpler models in predicting ORF. Further hyperparameter tuning and feature engineering could improve model accuracy and interpretability.
+
+```{r}
+################# Modeling
+# Define the response variable
+selected_predictors <- c("THK", "POROSITY", "SW", "PERMEABILITY", "PI", "API", "GOR")
+data_filtered <- dataset[, c(selected_predictors, "ORF")]
+
+set.seed(123)
+trainIndex <- createDataPartition(data_filtered$ORF, p = 0.8, list = FALSE)
+trainData <- data_filtered[trainIndex, ]
+testData <- data_filtered[-trainIndex, ]
+
+rf_trainData <- trainData
+rf_testData <- testData
+
+# Step 2: Define 10-Fold Cross-Validation
+cv_control <- trainControl(method = "cv", number = 10)
+
+# Step 3: Train Random Forest using 10-fold CV
+rf_model <- train(
+  ORF ~ ., 
+  data = trainData, 
+  method = "rf", 
+  trControl = cv_control,
+  tuneGrid = expand.grid(mtry = seq(2, floor(length(selected_predictors) / 3), by = 2)),
+  ntree = 100,
+  importance = TRUE,
+  metric = "RMSE",
+  tuneLength = 5,
+  nodesize = 5,
+  maxnodes = 30
+)
+
+
+# Linear Regression Model
+lm_model <- train(ORF ~ ., data = trainData, method = "lm", trControl = trainControl(method = "cv", number = 5))
+
+# Decision Tree Model
+dt_model <- rpart(ORF ~ ., data = trainData, method = "anova", control = rpart.control(cp = 0.01))
+
+# LOESS Model (best predictor selection) - Restrict to selected predictors
+correlations <- sapply(selected_predictors, function(col) cor(trainData$ORF, trainData[[col]], use = "complete.obs"))
+best_predictor <- names(which.max(abs(correlations)))
+loess_model <- loess(as.formula(paste("ORF ~", best_predictor)), data = trainData, span = 0.8)
+
+# Predictions for Train and Test Sets
+rf_train_pred <- predict(rf_model, trainData)
+rf_test_pred <- predict(rf_model, testData)
+lm_train_pred <- predict(lm_model, trainData)
+lm_test_pred <- predict(lm_model, testData)
+dt_train_pred <- predict(dt_model, trainData)
+dt_test_pred <- predict(dt_model, testData)
+loess_train_pred <- predict(loess_model, trainData)
+loess_test_pred <- predict(loess_model, testData)
+
+# Calculate RMSE for Training and Testing Sets
+rf_train_rmse <- RMSE(rf_train_pred, trainData$ORF)
+rf_test_rmse <- RMSE(rf_test_pred, testData$ORF)
+lm_train_rmse <- RMSE(lm_train_pred, trainData$ORF)
+lm_test_rmse <- RMSE(lm_test_pred, testData$ORF)
+dt_train_rmse <- RMSE(dt_train_pred, trainData$ORF)
+dt_test_rmse <- RMSE(dt_test_pred, testData$ORF)
+loess_train_rmse <- RMSE(loess_train_pred, trainData$ORF)
+loess_test_rmse <- RMSE(loess_test_pred, testData$ORF)
+
+rf_cv_results <- data.frame(
+  Metric = c("RMSE", "R-squared", "MAE"),
+  Value = c(
+    rf_model$results$RMSE[1], 
+    rf_model$results$Rsquared[1], 
+    rf_model$results$MAE[1]
+  )
+)
+knitr::kable(rf_cv_results, caption = "Random Forest 10-Fold Cross-Validation Results") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+#print("Random Forest 10-Fold Cross-Validation Results:")
+#print(rf_model)
+```
+## Random Forest Importance Variable Plot
+
+```{r}
+rf_importance <- varImp(rf_model, scale = TRUE)
+
+# Convert importance into a dataframe for visualization
+importance_df <- data.frame(Variable = rownames(rf_importance$importance), 
+                            Importance = rf_importance$importance[,1])
+
+# Sort by importance
+importance_df <- importance_df[order(importance_df$Importance, decreasing = TRUE),]
+
+# Plot feature importance
+library(ggplot2)
+ggplot(importance_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Feature Importance in Predicting ORF", 
+       x = "Variable", 
+       y = "Importance Score") +
+  theme_minimal()
+###################
+```
+
+## Linear Regression Coefficients
+The table below presents the estimated coefficients, standard errors, t-values, and p-values for the regression model used to predict oil recovery factor (ORF):
+```{r}
+# Extract coefficients
+coef_df <- as.data.frame(coef(summary(lm_model)))
+coef_df <- coef_df %>%
+  rownames_to_column(var = "Feature")  # Ensure Feature column does not duplicate
+
+# Rename columns for clarity
+colnames(coef_df) <- c("Feature", "Estimate", "Std. Error", "T-value", "P-Value")
+
+# Print table in a readable format
+knitr::kable(coef_df, format = "html", digits = 4) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## Results
+To evaluate model performance in predicting oil recovery factor (ORF), several regression models were trained and tested. The table below presents the Root Mean Squared Error (RMSE) for each model on both the training and test datasets:
+
+```{r}
+rmse_results <- data.frame(
+  Model = c("Random Forest", "Linear Regression", "Decision Tree", "LOESS"),
+  Train_RMSE = c(rf_train_rmse, lm_train_rmse, dt_train_rmse, loess_train_rmse),
+  Test_RMSE = c(rf_test_rmse, lm_test_rmse, dt_test_rmse, loess_test_rmse)
+  
+)
+knitr::kable(rmse_results, caption = "RMSE Comparison of Different Models")
+```
+
+Among the tested models, Random Forest achieved the lowest training RMSE (0.0895) and the lowest test RMSE (0.1050), demonstrating strong predictive performance with minimal overfitting. This suggests that Random Forest effectively captured the complexities in the training data while generalizing well to unseen data. Linear Regression and LOESS performed similarly on the test set, with LOESS (0.1060) slightly outperforming Linear Regression (0.1068). The Decision Tree model had the highest test RMSE (0.1116), indicating it struggled to capture the underlying patterns in the data as effectively as the other models.
+
+To further evaluate the reliability of Random Forest, 10-fold cross-validation was performed. The results showed an average RMSE of 0.1069, an R-squared value of 0.3996, and a Mean Absolute Error (MAE) of 0.0859. These metrics suggest that while Random Forest performs well, there is room for improvement in explaining variance in the data, as indicated by the moderate R-squared value. The tuning parameter mtry was held constant at 2, which may warrant further optimization to enhance performance.
+
+An analysis of feature importance, as shown in the variable importance plot, reveals that API and GOR are the most influential factors in predicting ORF, followed by PI and POROSITY. The prominence of API and GOR suggests that fluid properties play a crucial role in determining ORF, which aligns with domain expectations. Variables such as SW, PERMEABILITY, and THK had minimal impact on the model's predictions. This insight suggests that future model refinements could involve focusing on the most influential variables while potentially reducing less impactful features to streamline computations.
+
+These results highlight the advantage of using ensemble methods such as Random Forest for prediction tasks, as it outperformed the other models in both training and test accuracy. However, further hyperparameter tuning and feature selection could enhance its performance even further. Additionally, the comparable performance of Linear Regression and LOESS suggests that some relationships in the data may be well approximated using simpler models.
+
+## Conclusion
+- Random Forest performed best, achieving the lowest training RMSE (0.0895) and test RMSE (0.1050), indicating strong predictive performance with minimal overfitting.  
+- 10-fold cross-validation confirmed model reliability, with an average RMSE of 0.1069, an R² value of 0.3996, and an MAE of 0.0859, though the moderate R² suggests room for improvement.  
+- Feature importance analysis revealed that API and GOR were the most significant predictors of ORF, followed by PI and POROSITY. Variables such as SW, PERMEABILITY, and THK had minimal impact.  
+- Linear Regression and LOESS showed similar performance, suggesting that some relationships in the data may be well-approximated using simpler models.  
+- The Decision Tree model had the highest test RMSE (0.1116), indicating it struggled to capture complex patterns as effectively as ensemble methods.  
+- Further improvements can be made by optimizing hyperparameters (e.g., tuning `mtry`), refining feature selection, and exploring additional ensemble techniques. 
+
+### References{-}
+
+BSEE Repository (https://www.data.bsee.gov/GGStudies/Files/2020%20Atlas%20Update.zip)
